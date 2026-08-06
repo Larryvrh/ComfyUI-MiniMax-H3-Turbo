@@ -23,6 +23,8 @@ import comfy.utils
 import comfy.patcher_extension
 import folder_paths
 
+from comfy.utils import model_trange as trange
+
 SHIFT_V, SHIFT_A = 12.0, 3.0
 
 
@@ -69,7 +71,7 @@ def _turbo_sampler(model, x, sigmas, extra_args=None, callback=None, disable=Non
             "(the EmptyMiniMaxH3LatentAV / MiniMaxH3ImageToVideo output).")
     v_numel = math.prod(shapes[0][1:])           # flat pack is [video | audio]
     s_in = x.new_ones([x.shape[0]])
-    for i in range(len(sigmas) - 1):
+    for i in trange(len(sigmas) - 1, disable=disable):
         sv, sv_n = float(sigmas[i]), float(sigmas[i + 1])
         denoised = model(x, sigmas[i] * s_in, **extra_args)
         out = (x - denoised) / sigmas[i]
