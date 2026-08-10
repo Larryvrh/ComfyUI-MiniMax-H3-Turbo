@@ -183,13 +183,21 @@ def _egrid():
     return _EGRID
 
 
-def _unique_t(timestep, shift_v, shift_a, has_vis_cond):
+def _unique_t(timestep, shift_v, shift_a, has_vis_cond, has_aud_cond=False,
+              vis_aug=0.999, aud_aug=1.0):
+    # Mirrors the core model's unique-timestep set (comfy/ldm/minimax/model.py):
+    # {t_v, t_a} plus a pinned visual-cond row (keyframes / image / video refs)
+    # and a pinned audio-cond row (ref_audio segments). Missing the ref_audio row
+    # made the injected correction 2 rows against the model's 3-row t_emb and
+    # crashed every reference-audio run on the pruned base.
     sv = float((timestep.flatten()[0] / 1000.0).clamp(min=1e-6))
     t_v = 1.0 - sv
     t_a = 1.0 - _time_shift_sigma(sv, shift_v, shift_a)
     s = {t_v, t_a}
     if has_vis_cond:
-        s.add(max(t_v, 0.999))
+        s.add(max(t_v, vis_aug))
+    if has_aud_cond:
+        s.add(max(t_a, aud_aug))
     return sorted(s)
 
 
@@ -372,8 +380,17 @@ def _inject_adaln_egrid(new_model, dm, lora, adaln, strength):
         ts = args[1] if len(args) > 1 else kwargs.get("timestep")
         ctx = args[2] if len(args) > 2 else kwargs.get("context")
         payload = kwargs.get("minimax_payload") or {}
-        has_vc = bool(payload.get("keyframes") or payload.get("refs"))
-        us = _unique_t(ts, shift_v, shift_a, has_vc)
+        refs = payload.get("refs") or []
+        # Segment kinds per PackedLayout: keyframes -> "cond"; image and video refs
+        # -> "ref_img"; audio refs (standalone, or the audio rows of a video ref)
+        # -> "ref_audio" only when they carry rows (ref_audio_t > 0).
+        has_vc = bool(payload.get("keyframes")) or any(
+            blk.get("kind") in ("image", "video", "video_audio") for blk in refs)
+        has_ac = any(blk.get("kind") in ("audio", "video", "video_audio")
+                     and blk.get("ref_audio_t", 0) > 0 for blk in refs)
+        us = _unique_t(ts, shift_v, shift_a, has_vc, has_ac,
+                       vis_aug=float(payload.get("visual_cond_noise_aug", 0.999)),
+                       aud_aug=float(payload.get("audio_cond_noise_aug", 1.0)))
         shared["silu_temb"] = _interp_egrid(us, E, ctx.device, ctx.dtype)
         return executor(*args, **kwargs)
 
