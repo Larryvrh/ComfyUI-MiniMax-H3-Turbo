@@ -183,13 +183,34 @@ def _egrid():
     return _EGRID
 
 
-def _unique_t(timestep, shift_v, shift_a, has_vis_cond):
+def _conditioning_flags(payload):
+    layout = payload.get("layout")
+    if layout is not None:
+        kinds = {kind for _, _, kind in layout.segments}
+        return (bool(kinds & {"cond", "ref_img"}),
+                "ref_audio" in kinds)
+
+    refs = payload.get("refs") or ()
+    has_visual = bool(payload.get("keyframes")) or any(
+        ref.get("kind") in ("image", "video", "video_audio")
+        for ref in refs)
+    has_audio = any(
+        ref.get("kind") in ("audio", "video_audio")
+        and ref.get("ref_audio_t", 0) > 0
+        for ref in refs)
+    return has_visual, has_audio
+
+
+def _unique_t(timestep, shift_v, shift_a, payload):
     sv = float((timestep.flatten()[0] / 1000.0).clamp(min=1e-6))
     t_v = 1.0 - sv
     t_a = 1.0 - _time_shift_sigma(sv, shift_v, shift_a)
     s = {t_v, t_a}
+    has_vis_cond, has_aud_cond = _conditioning_flags(payload)
     if has_vis_cond:
-        s.add(max(t_v, 0.999))
+        s.add(max(t_v, float(payload.get("visual_cond_noise_aug", 0.999))))
+    if has_aud_cond:
+        s.add(max(t_a, float(payload.get("audio_cond_noise_aug", 1.0))))
     return sorted(s)
 
 
@@ -372,8 +393,7 @@ def _inject_adaln_egrid(new_model, dm, lora, adaln, strength):
         ts = args[1] if len(args) > 1 else kwargs.get("timestep")
         ctx = args[2] if len(args) > 2 else kwargs.get("context")
         payload = kwargs.get("minimax_payload") or {}
-        has_vc = bool(payload.get("keyframes") or payload.get("refs"))
-        us = _unique_t(ts, shift_v, shift_a, has_vc)
+        us = _unique_t(ts, shift_v, shift_a, payload)
         shared["silu_temb"] = _interp_egrid(us, E, ctx.device, ctx.dtype)
         return executor(*args, **kwargs)
 
