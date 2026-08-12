@@ -197,7 +197,7 @@ def _unique_t(timestep, shift_v, shift_a, payload):
     refs = payload.get("refs") or ()
     if payload.get("keyframes") or any(r.get("kind") == "image" for r in refs):
         s.add(max(t_v, float(payload.get("visual_cond_noise_aug", 0.999))))
-    if any(r.get("kind") == "audio" and r.get("ref_audio_t", 0) > 0 for r in refs):
+    if any(r.get("kind") in ("audio", "video_audio") and r.get("ref_audio_t", 0) > 0 for r in refs):
         s.add(max(t_a, float(payload.get("audio_cond_noise_aug", 1.0))))
     return sorted(s)
 
