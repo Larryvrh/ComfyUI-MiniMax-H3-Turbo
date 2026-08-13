@@ -238,10 +238,18 @@ def _make_adaln_forward(base, a, b, shared):
         x = base.linear(F.silu(t_emb) if base.apply_silu else t_emb)
         st = shared.get("silu_temb")
         if st is not None:
-            av = a.to(x.device, x.dtype)
-            bv = b.to(x.device, x.dtype)
-            sv = st.to(x.device, x.dtype)
-            x = x + (bv @ (av @ sv.T)).T                              # [M, out]
+            # On a curve-mode (pruned) base `x` is fp32 (adaln_dtype), so these bf16
+            # operands get upcast and the update is computed in fp32. On MPS that
+            # fp32 path makes the sampler emit NaN on the first step and poisons the
+            # whole render (issue #14; verified on M1 Max and M5 Max). Computing in
+            # the LoRA's own dtype avoids it. Non-pruned bases already compute this
+            # in bf16 on every backend, so this only makes the two paths agree, and
+            # it skips upcasting the largest operand (`out` is ~96k rows).
+            cd = a.dtype if (x.device.type == "mps" and a.dtype.is_floating_point) else x.dtype
+            av = a.to(x.device, cd)
+            bv = b.to(x.device, cd)
+            sv = st.to(x.device, cd)
+            x = x + (bv @ (av @ sv.T)).T.to(x.dtype)                  # [M, out]
         x = x.view(x.shape[0] * base.modalities, base.expand * base.hidden)
         return x.chunk(base.expand, dim=-1)
 
