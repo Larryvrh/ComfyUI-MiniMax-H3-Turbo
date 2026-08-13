@@ -202,9 +202,10 @@ def _conditioning_flags(payload):
 
 
 def _unique_t(timestep, shift_v, shift_a, payload):
-    sv = float((timestep.flatten()[0] / 1000.0).clamp(min=1e-6))
-    t_v = 1.0 - sv
-    t_a = 1.0 - _time_shift_sigma(sv, shift_v, shift_a)
+    """Return the unique timestep rows used by the injected AdaLN values."""
+    sigma_v = (timestep.flatten()[0] / 1000.0).float().clamp(min=1e-6)
+    t_v = float(1.0 - sigma_v)
+    t_a = float(1.0 - _time_shift_sigma(sigma_v, shift_v, shift_a))
     s = {t_v, t_a}
     has_vis_cond, has_aud_cond = _conditioning_flags(payload)
     if has_vis_cond:
