@@ -188,16 +188,17 @@ def _unique_t(timestep, shift_v, shift_a, payload):
     the injected adaln delta carries one row per unique t, so the set built here
     must dedup and sort to exactly the rows the model builds — same float32
     tensor arithmetic (a float64 recompute can disagree on t_v == t_a collapse),
-    same conditioning rows: visual cond (keyframes / image refs) pins near 1,
-    and an audio ref adds its own max(t_a, aug) row."""
+    same conditioning rows: visual cond (keyframes / image / video refs) pins
+    near 1, and a soundtrack or standalone audio ref adds its own max(t_a, aug)
+    row."""
     sigma_v = (timestep.flatten()[0] / 1000.0).float().clamp(min=1e-6)
     t_v = float(1.0 - sigma_v)
     t_a = float(1.0 - _time_shift_sigma(sigma_v, shift_v, shift_a))
     s = {t_v, t_a}
     refs = payload.get("refs") or ()
-    if payload.get("keyframes") or any(r.get("kind") == "image" for r in refs):
+    if payload.get("keyframes") or any(r.get("kind") in ("image", "video", "video_audio") for r in refs):
         s.add(max(t_v, float(payload.get("visual_cond_noise_aug", 0.999))))
-    if any(r.get("kind") == "audio" and r.get("ref_audio_t", 0) > 0 for r in refs):
+    if any(r.get("kind") in ("audio", "video_audio") and r.get("ref_audio_t", 0) > 0 for r in refs):
         s.add(max(t_a, float(payload.get("audio_cond_noise_aug", 1.0))))
     return sorted(s)
 
