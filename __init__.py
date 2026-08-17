@@ -226,7 +226,7 @@ def _interp_egrid(unique_t, E, device, dtype):
     return torch.stack(rows).to(dtype)                               # [M, 2688]
 
 
-def _make_adaln_forward(base, a, b, shared):
+def _make_adaln_forward(base, a, b, shared, table=None, egrid=None):
     """Curve-mode adaln injection as a *forward-attribute* patch: returns a
     replacement AdalnProj.forward that adds B @ A @ silu(t_emb) to the projection
     before the reference view/chunk. Installed via add_object_patch on the
@@ -249,8 +249,19 @@ def _make_adaln_forward(base, a, b, shared):
 
     def forward(t_emb):
         x = base.linear(F.silu(t_emb) if base.apply_silu else t_emb)
-        st = shared.get("silu_temb")
-        if st is not None:
+
+        st = None
+        if table is not None and egrid is not None and not base.apply_silu:
+            try:
+                tb = table.to(t_emb.device, torch.float32)
+                idx = torch.cdist(t_emb.detach().float(), tb).argmin(dim=1)
+                st = egrid.to(t_emb.device)[idx]          # [M, 2688], M from the model
+            except Exception:
+                st = None
+        if st is None:
+            st = shared.get("silu_temb")                  # legacy _unique_t path
+
+        if st is not None and st.shape[0] == x.shape[0]:
             av = a.to(x.device, x.dtype)
             bv = b.to(x.device, x.dtype)
             sv = st.to(x.device, x.dtype)
@@ -390,6 +401,14 @@ def _inject_adaln_egrid(new_model, dm, lora, adaln, strength):
     shift_v = float(getattr(dm, "sigma_shift_video", SHIFT_V))
     shift_a = float(getattr(dm, "sigma_shift_audio", SHIFT_A))
 
+    tt = None
+    for _n, _t in list(dm.named_buffers()) + list(dm.named_parameters()):
+        if _n.endswith("adaln_t_table"):
+            tt = _t
+            break
+    if tt is not None and tt.shape[0] != E.shape[0]:
+        tt = None
+
     def wrap(executor, *args, **kwargs):
         ts = args[1] if len(args) > 1 else kwargs.get("timestep")
         ctx = args[2] if len(args) > 2 else kwargs.get("context")
@@ -406,7 +425,7 @@ def _inject_adaln_egrid(new_model, dm, lora, adaln, strength):
         key = "diffusion_model." + name.rsplit(".linear", 1)[0]
         new_model.add_object_patch(
             key + ".forward",
-            _make_adaln_forward(new_model.get_model_object(key), a, b, shared))
+            _make_adaln_forward(new_model.get_model_object(key), a, b, shared, tt, E))
 
 
 def _add_dbg_wrapper(new_model, dm, tag, mode):
