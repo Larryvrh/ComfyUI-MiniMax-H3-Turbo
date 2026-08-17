@@ -183,21 +183,34 @@ def _egrid():
     return _EGRID
 
 
+def _conditioning_flags(payload):
+    layout = payload.get("layout")
+    if layout is not None:
+        kinds = {kind for _, _, kind in layout.segments}
+        return (bool(kinds & {"cond", "ref_img"}),
+                "ref_audio" in kinds)
+
+    refs = payload.get("refs") or ()
+    has_visual = bool(payload.get("keyframes")) or any(
+        ref.get("kind") in ("image", "video", "video_audio")
+        for ref in refs)
+    has_audio = any(
+        ref.get("kind") in ("audio", "video_audio")
+        and ref.get("ref_audio_t", 0) > 0
+        for ref in refs)
+    return has_visual, has_audio
+
+
 def _unique_t(timestep, shift_v, shift_a, payload):
-    """Mirror of the model's unique-timestep row computation (model.py forward):
-    the injected adaln delta carries one row per unique t, so the set built here
-    must dedup and sort to exactly the rows the model builds — same float32
-    tensor arithmetic (a float64 recompute can disagree on t_v == t_a collapse),
-    same conditioning rows: visual cond (keyframes / image refs) pins near 1,
-    and an audio ref adds its own max(t_a, aug) row."""
+    """Return the unique timestep rows used by the injected AdaLN values."""
     sigma_v = (timestep.flatten()[0] / 1000.0).float().clamp(min=1e-6)
     t_v = float(1.0 - sigma_v)
     t_a = float(1.0 - _time_shift_sigma(sigma_v, shift_v, shift_a))
     s = {t_v, t_a}
-    refs = payload.get("refs") or ()
-    if payload.get("keyframes") or any(r.get("kind") == "image" for r in refs):
+    has_vis_cond, has_aud_cond = _conditioning_flags(payload)
+    if has_vis_cond:
         s.add(max(t_v, float(payload.get("visual_cond_noise_aug", 0.999))))
-    if any(r.get("kind") == "audio" and r.get("ref_audio_t", 0) > 0 for r in refs):
+    if has_aud_cond:
         s.add(max(t_a, float(payload.get("audio_cond_noise_aug", 1.0))))
     return sorted(s)
 
