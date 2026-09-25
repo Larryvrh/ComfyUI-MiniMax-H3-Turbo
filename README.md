@@ -106,6 +106,35 @@ size suggests — an 80 GB GPU is only needed for the largest resolutions in `by
 mode. If you hit out-of-memory, turn `low_vram` **on** and/or lower the resolution
 or frame count.
 
+### Why you need this node (not just a LoRA loader)
+
+The turbo LoRAs are authored against a base whose `adaln_proj` path is at one size;
+on a base where that path differs, a **stock loader silently applies only part of the
+LoRA** instead of failing loudly.
+
+Measured instance — `minimax_h3_turbo_v4_step600` through `LoraLoaderModelOnly` on a
+pruned INT8 base:
+
+- **208 of 259 modules applied (80.3%)**
+- **51 skipped, all of them `adaln_proj.linear`**
+- one `ERROR lora` line per layer, i.e. 50 per sampling step
+
+```
+ERROR lora ... adaln_proj linear.weight shape '[96768, 8]' is invalid
+for input of size 260112384
+```
+
+AdaLN is exactly the pathway step-distillation is meant to change, so a partially
+applied turbo LoRA is not the model that was trained and benchmarked.
+
+**MiniMax-H3 Turbo LoRA does not have this problem**: it detects a pruned base and
+re-injects the LoRA's time-conditioning at run time — that is what the `silu(t_emb)`
+grid is for.
+
+**How to tell which you got:** after the LoRA loads, search the console for
+`adaln_proj`. Repeated `ERROR lora` lines mean a partial load — swap the loader for
+this node.
+
 ## Why a custom sampler (and how it adapts)
 
 MiniMax-H3 denoises the video and audio streams on two different flow schedules
