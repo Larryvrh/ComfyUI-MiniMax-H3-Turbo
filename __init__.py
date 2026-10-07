@@ -23,6 +23,7 @@ from tqdm.auto import trange
 import comfy.samplers
 import comfy.model_sampling
 import comfy.lora
+import comfy.ops
 import comfy.weight_adapter
 import comfy.utils
 import comfy.patcher_extension
@@ -278,6 +279,33 @@ class MiniMaxH3TurboSampler:
         return (comfy.samplers.KSAMPLER(_turbo_sampler),)
 
 
+_FUSED_LINEAR_ARGS = ("input_act", "act_weight", "residual", "residual_scale")
+
+
+def _fused_linear_args(args, kwargs):
+    """Fused-epilogue/prologue arguments a ComfyUI Linear.forward was called with.
+
+    Recent ComfyUI (post-0.39.0 master, "Consolidate Linear forward API") folds an
+    input activation into the layer itself — e.g. the MiniMax-H3 MLP calls
+    `fc2(fc1(x), input_act="swiglu")` — so the tensor a bypass hook receives is the
+    *pre-activation* x (2x wide for swiglu). The base forward applies the activation
+    internally, but the LoRA branch must apply it too or its `down` projection sees
+    the wrong width (mat1 and mat2 shapes cannot be multiplied). Older ComfyUI never
+    passes these, so this returns an empty dict there and nothing changes."""
+    a = dict(zip(_FUSED_LINEAR_ARGS, args))
+    for k in _FUSED_LINEAR_ARGS + ("act_eps",):
+        if k in kwargs:
+            a[k] = kwargs[k]
+    return a
+
+
+def _apply_input_act(x, input_act, act_weight=None, act_eps=0.0):
+    fn = getattr(comfy.ops, "_eager_input_act", None)
+    if fn is not None:
+        return fn(x, input_act, act_weight, act_eps)
+    return comfy.ops.INPUT_ACT_EAGER[input_act](x)
+
+
 class _FrugalLoRA(comfy.weight_adapter.LoRAAdapter):
     """LoRA bypass adapter with a memory-frugal additive path.
 
@@ -291,18 +319,31 @@ class _FrugalLoRA(comfy.weight_adapter.LoRAAdapter):
     into base_out in place keeps one temporary instead of three. base_out is the
     module's fresh output, so the in-place add is safe. Numerically identical to
     the stock LoRA bypass. Linear-only (all H3 lora modules are Linear); anything
-    else falls back to the stock path."""
+    else falls back to the stock path.
+
+    Fused-activation aware: when the layer is called with `input_act=` (and
+    optionally `residual=` / `residual_scale=`), the LoRA branch runs on the
+    *activated* input and its delta is scaled like the base output, matching
+    `residual + residual_scale * linear(act(x))`."""
 
     def bypass_forward(self, org_forward, x, *args, **kwargs):
-        base_out = org_forward(x, *args, **kwargs)
         if getattr(self, "is_conv", False):
             return super().bypass_forward(org_forward, x, *args, **kwargs)
+        base_out = org_forward(x, *args, **kwargs)
+        fused = _fused_linear_args(args, kwargs)
+        input_act = fused.get("input_act")
+        lx = x if input_act is None else _apply_input_act(
+            x, input_act, fused.get("act_weight"), fused.get("act_eps", 0.0))
         up, down, alpha = self.weights[0], self.weights[1], self.weights[2]
         rank = down.shape[0]
         scale = (alpha / rank if alpha is not None else 1.0) * getattr(self, "multiplier", 1.0)
-        down = down.to(dtype=x.dtype)
-        up = up.to(dtype=x.dtype)
-        return base_out.add_(F.linear(F.linear(x, down), up), alpha=scale)
+        down = down.to(dtype=lx.dtype)
+        up = up.to(dtype=lx.dtype)
+        delta = F.linear(F.linear(lx, down), up)
+        del lx
+        if fused.get("residual") is not None and fused.get("residual_scale") is not None:
+            delta = delta * fused["residual_scale"]      # base = residual + residual_scale * linear(...)
+        return base_out.add_(delta, alpha=scale)
 
 
 def _apply_bypass_lora(new_model, lora, modules, strength):
